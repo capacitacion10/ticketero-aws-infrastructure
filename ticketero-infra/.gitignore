@@ -1,0 +1,42 @@
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+.mvn/timing.properties
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# Node modules (if any)
+node_modules/
+
+# CDK Context
+cdk.context.json
