@@ -1,0 +1,225 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+  JAVA_VERSION: 21
+
+jobs:
+  # ==========================================================================
+  # Test Java Application
+  # ==========================================================================
+  test-app:
+    name: 🧪 Test Java Application
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: ☕ Setup Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        
+    - name: 📦 Cache Maven dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2
+        
+    - name: 🧪 Run tests
+      working-directory: ./ticketero
+      run: |
+        ./mvnw clean test
+        
+    - name: 📊 Generate test report
+      uses: dorny/test-reporter@v1
+      if: success() || failure()
+      with:
+        name: Maven Tests
+        path: ticketero/target/surefire-reports/*.xml
+        reporter: java-junit
+        
+    - name: 📈 Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./ticketero/target/site/jacoco/jacoco.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  # ==========================================================================
+  # Build Docker Image
+  # ==========================================================================
+  build-image:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test-app
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🐳 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: 🏗️ Build Docker image
+      working-directory: ./ticketero
+      run: |
+        docker build -t ticketero:${{ github.sha }} .
+        
+    - name: 🧪 Test Docker image
+      run: |
+        docker run --rm ticketero:${{ github.sha }} java -version
+
+  # ==========================================================================
+  # Validate CDK Infrastructure
+  # ==========================================================================
+  validate-infra:
+    name: 🏗️ Validate CDK Infrastructure
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: ☕ Setup Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: 📦 Install CDK
+      run: npm install -g aws-cdk@2.170.0
+      
+    - name: 📦 Cache Maven dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-infra-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2-infra
+        
+    - name: 🔍 Compile CDK app
+      working-directory: ./ticketero-infra
+      run: mvn compile
+      
+    - name: ✅ Synthesize CDK stacks
+      working-directory: ./ticketero-infra
+      run: cdk synth
+      
+    - name: 📋 Upload CDK templates
+      uses: actions/upload-artifact@v4
+      with:
+        name: cdk-templates
+        path: ticketero-infra/cdk.out/*.template.json
+
+  # ==========================================================================
+  # Security Scan
+  # ==========================================================================
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: test-app
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🔍 Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: './ticketero'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        
+    - name: 📤 Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # ==========================================================================
+  # Deploy to Development (only on main branch)
+  # ==========================================================================
+  deploy-dev:
+    name: 🚀 Deploy to Development
+    runs-on: ubuntu-latest
+    needs: [test-app, build-image, validate-infra]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: development
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: ☕ Setup Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: 📦 Install CDK
+      run: npm install -g aws-cdk@2.170.0
+      
+    - name: 🔑 Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: 🏗️ Deploy infrastructure
+      working-directory: ./ticketero-infra
+      env:
+        CDK_DEFAULT_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+        CDK_DEFAULT_REGION: ${{ env.AWS_REGION }}
+      run: |
+        mvn compile
+        cdk deploy --all --require-approval never
+        
+    - name: 📋 Get deployment outputs
+      run: |
+        aws cloudformation describe-stacks \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Stacks[?starts_with(StackName, `ticketero-dev`)].Outputs' \
+          --output table
+
+  # ==========================================================================
+  # Notification
+  # ==========================================================================
+  notify:
+    name: 📢 Notify Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy-dev]
+    if: always()
+    
+    steps:
+    - name: 📢 Notify success
+      if: needs.deploy-dev.result == 'success'
+      run: |
+        echo "✅ Deployment successful!"
+        echo "🌐 Application URL: Check CloudFormation outputs"
+        
+    - name: 📢 Notify failure
+      if: needs.deploy-dev.result == 'failure'
+      run: |
+        echo "❌ Deployment failed!"
+        echo "🔍 Check the logs for more details"
